@@ -19,51 +19,38 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#ifndef _Octree_h_
-#define _Octree_h_
-
-#include <vector>
-#include <glm/glm.hpp>
-
 #include "OctreeNode.h"
+#include <stdint.h>
+#include <iostream>
 
-class Octree
+OctreeNode::OctreeNode( const glm::vec3 center, const float size )
+    : _value( 0 )
+    , _center( center )
+    , _size( size )
+{}
+
+void OctreeNode::setChild( OctreeNode* child )
 {
-public:
-    Octree( const std::vector<float>& events, float voxelSize );
-    ~Octree();
+    _children.push_back( child );
+}
 
-    const glm::uvec3& getVolumeDim() const;
-    uint64_t getVolumeSize() const;
-    uint32_t getOctreeSize() const;
+void OctreeNode::addValue( float value )
+{
+    if( value > _value )
+        _value = value;
+}
 
-    uint32_t* getFlatIndexes() const;
-    float* getFlatData() const;
+const glm::vec3& OctreeNode::getCenter() const
+{
+    return _center;
+}
 
-private:
-    void _flattenChildren( const OctreeNode* node, uint32_t level );
+const float OctreeNode::getValue() const
+{
+    return _value;
+}
 
-    inline uint32_t _pow2roundup( uint32_t x )
-    {
-        if (x < 0)
-            return 0;
-        --x;
-        x |= x >> 1;
-        x |= x >> 2;
-        x |= x >> 4;
-        x |= x >> 8;
-        x |= x >> 16;
-        return x+1;
-    }
-
-    glm::uvec3 _volumeDim;
-    uint64_t _volumeSize;
-    uint32_t _octreeSize;
-
-    uint32_t* _offsetPerLevel;
-
-    uint32_t* _flatIndexes;
-    float* _flatData;
-};
-
-#endif //_Octree_h_
+const std::vector< OctreeNode* >& OctreeNode::getChildren() const
+{
+    return _children;
+}
