@@ -30,6 +30,100 @@
 namespace SMS = CGAL::Surface_mesh_simplification;
 namespace PMP = CGAL::Polygon_mesh_processing;
 
+struct IntersectionConstrainedMap{
+  typedef edge_descriptor key_type;
+  typedef bool value_type;
+  typedef value_type reference;
+  typedef boost::readable_property_map_tag category;
+
+  IntersectionConstrainedMap( const SurfaceMesh& mesh )
+  {}
+
+  void addEdge( const edge_descriptor& edge )
+  {
+      _unremovableEdges.push_back( edge );
+  }
+
+  std::vector< edge_descriptor > _unremovableEdges;
+
+  friend bool get( IntersectionConstrainedMap map, const edge_descriptor& edge)
+  {
+    if( std::find( map._unremovableEdges.begin(), map._unremovableEdges.end(), edge ) == map._unremovableEdges.end( ))
+        return false;
+
+    //std::cout << "Found an uncollapsable edge! " << map._unremovableEdges.size() << std::endl;
+    return true;
+  }
+};
+
+typedef SMS::Constrained_placement<SMS::LindstromTurk_placement<SurfaceMesh>,
+                                   IntersectionConstrainedMap > Placement;
+
+struct collapseVisitor : SMS::Edge_collapse_visitor_base<SurfaceMesh>
+{
+  collapseVisitor( Point_3* v0, Point_3* v1, halfedge_descriptor* h )
+      : _v0( v0 )
+      , _v1( v1 )
+      , _h( h )
+  {}
+  /*// Called during the collecting phase for each edge collected.
+  void OnCollected( Profile const&, boost::optional<double> const& )
+  {
+    ++ stats->collected ;
+    std::cerr << "\rEdges collected: " << stats->collected << std::flush ;
+  }
+
+  // Called during the processing phase for each edge selected.
+  // If cost is absent the edge won't be collapsed.
+  void OnSelected(Profile const&
+                 ,boost::optional<double> cost
+                 ,std::size_t             initial
+                 ,std::size_t             current
+                 )
+  {
+    ++ stats->processed ;
+    if ( !cost )
+      ++ stats->cost_uncomputable ;
+
+    if ( current == initial )
+      std::cerr << "\n" << std::flush ;
+    std::cerr << "\r" << current << std::flush ;
+  }
+
+  // Called for each edge which failed the so called link-condition,
+  // that is, which cannot be collapsed because doing so would
+  // turn the surface mesh into a non-manifold.
+  void OnNonCollapsable( Profile const& )
+  {
+    ++ stats->non_collapsable;
+  }*/
+
+  // Called during the processing phase for each edge being collapsed.
+  // If placement is absent the edge is left uncollapsed.
+  /*void OnCollapsing(  Profile const &profile , boost::optional<Point> )
+  {
+      //std::cout << "v0: " << profile.v0()->point() << " v1: " << profile.v1()->point() << std::endl;
+      *_v0 = profile.v0()->point();
+      *_v1 = profile.v1()->point();
+      *_h = profile.v0_v1();
+      //std::cout<< x << std::endl;
+      //hit->opposite()->vertex()->point(
+      //std::cout<<"halfedge: " << &(*profile.v0_v1()) << std::endl;
+  }*/
+
+  // Called AFTER each edge has been collapsed
+  void OnCollapsed( Profile const &profile, Vertex_handle )
+  {
+      *_v0 = profile.v0()->point();
+      *_v1 = profile.v1()->point();
+      *_h = profile.v0_v1();
+  }
+
+  Point_3* _v0;
+  Point_3* _v1;
+  halfedge_descriptor* _h;
+};
+
 bool compareByValue( const Event& e1, const Event& e2 )
 {
     return e1.value > e2.value;
@@ -199,16 +293,67 @@ void Mesher::mesh( const std::string& outputFile )
     std::cout << (intersecting ? "There are self-intersections " : "There is no self-intersection ")
               << "before the decimation process."<<std::endl;
 
-    SMS::Count_ratio_stop_predicate< SurfaceMesh > stop( _decimationRatio );
 
-    int r = SMS::edge_collapse
+    Point_3 v0;
+    Point_3 v1;
+    halfedge_descriptor h;
+    collapseVisitor visitor( &v0, &v1, &h );
+
+    bool unfinished = true;
+    bool selfIntersecting = true;
+    //double decimationStep = 0.05;
+    uint32_t decimationStep = 32768;
+    SurfaceMesh oldMesh = mesh;
+    uint32_t remainingEdges = mesh.size_of_halfedges();
+
+    IntersectionConstrainedMap nonRemovableEdges( oldMesh );
+
+    while( unfinished )
+    {
+        while( selfIntersecting )
+        {
+            mesh = oldMesh;
+            //double decimationRatio = 1.0d - decimationStep;
+            uint32_t decimationFaces = mesh.size_of_facets() - decimationStep;
+
+            //if( decimationStep * remainingEdges <= 1.0d )
+            if( decimationStep == 0 )
+            {
+                edge_descriptor e = edge( h, oldMesh );
+                nonRemovableEdges.addEdge( e );
+                std::cout<<"Mark the edge " << v0 <<" - " << v1 <<" as non removable!"<< std::endl;
+                break;
+            }
+
+            //std::cout<< "Try decimating to ratio: " << decimationRatio << std::endl;
+            //SMS::Count_ratio_stop_predicate< SurfaceMesh > stop( decimationRatio );
+            std::cout<< "Try decimating to ratio: " << decimationFaces << " @step: " << decimationStep << std::endl;
+            SMS::Count_stop_predicate<SurfaceMesh> stop( decimationFaces );
+            SMS::edge_collapse
                   ( mesh
                    ,stop
                    ,CGAL::parameters::vertex_index_map(get(CGAL::vertex_external_index, mesh ))
                                      .halfedge_index_map  (get(CGAL::halfedge_external_index  , mesh ))
-                                     .get_cost (SMS::LindstromTurk_cost<SurfaceMesh>())
-                                     .get_placement(SMS::LindstromTurk_placement<SurfaceMesh>())
+                                     //.get_cost (SMS::LindstromTurk_cost<SurfaceMesh>())
+                                     .edge_is_constrained_map( nonRemovableEdges )
+                                     .get_placement(Placement( nonRemovableEdges ))
+                                     //.get_placement(SMS::LindstromTurk_placement<SurfaceMesh>())
+                                     .visitor( visitor )
                   );
+
+            selfIntersecting = PMP::does_self_intersect(mesh,
+                PMP::parameters::vertex_point_map( get( CGAL::vertex_point, mesh )));
+            if( selfIntersecting )
+                decimationStep = decimationStep / 2.0d;
+        }
+        oldMesh = mesh;
+        selfIntersecting = true;
+        //decimationStep = 0.05;
+        decimationStep = 32768;
+        remainingEdges = mesh.size_of_halfedges();
+        std::cout << "decimated to [V:" << mesh.size_of_vertices() << " F:" << mesh.size_of_facets() << "] "<< std::endl;
+    }
+
     std::cout<<"decimation finished" << std::endl;
     std::string fileDecimated = outputFile + "_decimated.off";
     std::ofstream outputDecimated( fileDecimated );
@@ -220,11 +365,145 @@ void Mesher::mesh( const std::string& outputFile )
     std::cout << (intersecting ? "There are self-intersections" : "There is no self-intersection")
               << " after the decimation process."<< std::endl;
 
+    // ************************** SELF-INTERSECTING FACES REMOVAL ***********************************
+
+    //std::vector<std::pair<Facet_handle, Facet_handle> > intersected_tris;
     std::vector<std::pair<face_descriptor, face_descriptor> > intersected_tris;
+
     PMP::self_intersections( mesh, std::back_inserter( intersected_tris ),
                              PMP::parameters::vertex_point_map( get( CGAL::vertex_point, mesh )));
-    std::cout << intersected_tris.size() << " pairs of triangles intersect." << std::endl;
 
+    while( !intersected_tris.empty( ))
+    {
+        std::cout << intersected_tris.size() << " pairs of triangles intersect." << std::endl;
+        std::cout << "Face number: " << mesh.size_of_facets() << std::endl;
+
+        for( const auto& facePair : intersected_tris )
+        {
+            if( &(*facePair.first) )
+            {
+                Halfedge_handle h = halfedge( facePair.first, mesh );
+                std::cout<< "facet address: " << &(*h) << std::endl;
+                if( &(*h) )
+                {
+                    if( !h->is_border( ))
+                        mesh.erase_facet( h );
+                }
+            std::cout<< "SUCCESS :)" << std::endl;
+            }
+            if( &(*facePair.second ) )
+            {
+                Halfedge_handle h = halfedge( facePair.second, mesh );
+                std::cout<< "facet address: " << &(*h) << std::endl;
+                if( &(*h) )
+                {
+                    if( !h->is_border( ))
+                    {
+                        std::cout<<"erasing" << std::endl;
+                        mesh.erase_facet( h );
+                    }
+                }
+                std::cout<< "SUCCESS :)" << std::endl;
+            }
+        }
+
+        //mesh.erase_facet( halfedge( intersected_tris[0].first, mesh ));
+        /*mesh.erase_facet( he );
+        if( !he->is_border( ))
+            mesh.erase_facet( he->opposite( ));
+
+        he = halfedge( intersected_tris[0].second, mesh );
+        mesh.erase_facet( he );
+        if( !he->is_border( ))
+            mesh.erase_facet( he->opposite( ));*/
+
+        std::cout << "Face number after: " << mesh.size_of_facets() << std::endl;
+
+        //mesh.erase_facet( halfedge( intersected_tris[0].second, mesh ));
+        //mesh.erase_connected_component( halfedge( intersected_tris[0].first, mesh ));
+
+        //for( const auto& facePair : intersected_tris )
+        //{
+        //    if( is_valid( halfedge( facePair.first, mesh )))
+        //        mesh.erase_facet( halfedge( facePair.first, mesh ));
+        //}
+
+        /*std::map< face_descriptor, uint32_t > occurances;
+        for( uint32_t i = 0; i < intersected_tris.size(); ++i )
+        {
+        ++occurances[ intersected_tris[ i ].first ];
+        }
+        for( uint32_t i = 0; i < intersected_tris.size(); ++i )
+        {
+        ++occurances[ intersected_tris[ i ].second ];
+        }
+        uint32_t maxCount = 0;
+        for( const auto& count : occurances )
+            maxCount = std::max( maxCount, count.second );*/
+
+        /*for( const auto& count : occurances )
+        {
+            if( count.second == maxCount )
+            {
+                std::cout<< "Erasing facet" << std::endl;
+                //mesh.erase_facet( halfedge( count.first, mesh ));
+                //mesh.make_hole( halfedge( count.first, mesh ));
+            }
+            break;
+        }*/
+
+        intersected_tris.clear();
+        PMP::self_intersections( mesh, std::back_inserter( intersected_tris ),
+                         PMP::parameters::vertex_point_map( get( CGAL::vertex_point, mesh )));
+
+        //mesh.erase_facet( halfedge( intersected_tris[0].first, mesh ));
+        //mesh.make_hole( halfedge( intersected_tris[0].first, mesh ));
+    }
+
+    /*for( const auto& trianglePair : intersected_tris )
+    {
+        std::cout<<"Removing face"<< std::endl;
+        //mesh.erase_facet( halfedge( trianglePair.first, mesh ));
+        //mesh.erase_facet( halfedge( trianglePair.second, mesh ));
+        //mesh.erase_facet( trianglePair.first );
+        //CGAL::remove_face( trianglePair.first, mesh );
+        //CGAL::remove_face( trianglePair.second, mesh );
+        //mesh.remove_face( trianglePair.first );
+    }*/
+    std::cout<<"Faces Removed!" << std::endl;
+
+    // ************************** HOLE FILLING **********************************
+
+    /*for( const auto& halfedge : halfedges( mesh ))
+    {
+        if( halfedge->is_border( ))
+        {
+            std::vector<Facet_handle>  patch_facets;
+            std::vector<Vertex_handle> patch_vertices;
+            bool success = CGAL::cpp11::get<0>(
+                  CGAL::Polygon_mesh_processing::triangulate_refine_and_fair_hole(
+                  mesh,
+                  halfedge,
+                  std::back_inserter(patch_facets),
+                  std::back_inserter(patch_vertices),
+                  CGAL::Polygon_mesh_processing::parameters::vertex_point_map(get(CGAL::vertex_point, mesh)).
+                  geom_traits(Kernel())) );
+
+
+            std::cout << " Number of facets in constructed patch: " << patch_facets.size() << std::endl;
+            std::cout << " Number of vertices in constructed patch: " << patch_vertices.size() << std::endl;
+            std::cout << " Fairing : " << (success ? "succeeded" : "failed") << std::endl;
+        }
+    }*/
+
+    // ************************** HOLE FILLING **********************************
+
+    std::string fileRemoved = outputFile + "_decimated_removed.off";
+    std::ofstream outputRemoved( fileRemoved );
+    std::cout<< "Writing file..." << std::endl;
+    outputRemoved << mesh;
+
+    std::cout<<"File written!" << std::endl;
 
     std::cout << "Done. 2 files written: " << std::endl;
     std::cout << "original  [V:" << tr.number_of_vertices() << " F:" << c2t3.number_of_facets()
